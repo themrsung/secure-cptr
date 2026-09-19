@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 from fastapi import APIRouter, Request, UploadFile, File as FastAPIFile, HTTPException
 from fastapi.responses import Response
@@ -55,6 +56,53 @@ async def upload(request: Request, file: UploadFile = FastAPIFile(...)):
     return {"id": record.id, "url": url_path}
 
 
+# Types the browser will render inline without being able to run script.
+_INLINE_SAFE_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/x-icon",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/webm",
+    "audio/ogg",
+    "video/mp4",
+    "video/webm",
+    "application/pdf",
+    "text/plain",
+}
+
+# Renderable as markup, or able to carry script. Never served inline.
+_ACTIVE_TYPE_MARKERS = (
+    "html",
+    "svg",
+    "xml",
+    "javascript",
+    "ecmascript",
+    "xhtml",
+    "mathml",
+)
+
+
+def _safe_disposition(content_type: str) -> tuple[str, str]:
+    """Return a (content_type, disposition) pair that cannot execute on-origin."""
+    normalized = (content_type or "").split(";")[0].strip().lower()
+    if normalized in _INLINE_SAFE_TYPES:
+        return normalized, "inline"
+    if any(marker in normalized for marker in _ACTIVE_TYPE_MARKERS):
+        # Strip the renderable type entirely so nosniff cannot be bypassed.
+        return "application/octet-stream", "attachment"
+    return normalized or "application/octet-stream", "attachment"
+
+
+def _safe_filename(name: str) -> str:
+    """Strip quotes/CR/LF so the filename cannot break out of the header."""
+    cleaned = re.sub(r'[\r\n"\\]', "", name or "download")
+    return cleaned[:200] or "download"
+
+
 @router.get("/{file_id_ext:path}")
 async def get_upload(file_id_ext: str):
     """Serve an uploaded file. Public (no auth); UUID is unguessable.
@@ -75,12 +123,22 @@ async def get_upload(file_id_ext: str):
 
     content_type = (record.meta or {}).get("content_type", "application/octet-stream")
 
+    # This route is unauthenticated and serves attacker-supplied bytes under
+    # the application's own origin. Anything the browser may execute as markup
+    # is forced to download and neutered, otherwise an uploaded .html/.svg
+    # becomes stored XSS: script running here can call the authenticated API
+    # with the viewer's session cookie and exfiltrate configured keys.
+    content_type, disposition = _safe_disposition(content_type)
+
     return Response(
         content=data,
         media_type=content_type,
         headers={
             "Cache-Control": "public, max-age=31536000, immutable",
-            "Content-Disposition": f'inline; filename="{record.filename}"',
+            "Content-Disposition": f'{disposition}; filename="{_safe_filename(record.filename)}"',
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "X-Frame-Options": "DENY",
         },
     )
 

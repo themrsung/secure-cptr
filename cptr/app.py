@@ -221,10 +221,17 @@ if audit_level != AuditLevel.NONE:
 from fastapi.middleware.cors import CORSMiddleware
 from cptr.env import CORS_ALLOWED_ORIGINS
 
+# Starlette echoes the caller's Origin (rather than a literal "*") whenever
+# credentials are allowed, so "*" + allow_credentials would let *any* site read
+# authenticated responses. Credentials are only permitted for an explicit
+# origin allowlist; the wildcard default stays anonymous-only.
+_cors_origins = CORS_ALLOWED_ORIGINS if isinstance(CORS_ALLOWED_ORIGINS, list) else ["*"]
+_cors_wildcard = "*" in _cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ALLOWED_ORIGINS if isinstance(CORS_ALLOWED_ORIGINS, list) else ["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )

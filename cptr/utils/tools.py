@@ -1901,6 +1901,22 @@ async def manage_skill(
 # ── Browser tools ────────────────────────────────────────────
 
 
+async def _decrypt_config(key: str) -> str:
+    """Read a credential config value, decrypting it. Plain values pass through."""
+    from cptr.models import Config
+
+    stored = await Config.get(key)
+    if not isinstance(stored, str) or not stored:
+        return ""
+    try:
+        from cptr.utils.config import _get_jwt_secret
+        from cptr.utils.crypto import decrypt_key
+
+        return decrypt_key(stored, _get_jwt_secret()) or ""
+    except Exception:
+        return ""
+
+
 async def _get_browser_config() -> dict:
     """Read browser config from DB."""
     try:
@@ -1914,10 +1930,10 @@ async def _get_browser_config() -> dict:
             if await Config.get("browser.auto_launch") is not None
             else True,
             "session_timeout": int(await Config.get("browser.session_timeout_minutes") or 10),
-            "firecrawl_api_key": await Config.get("browser.firecrawl_api_key") or "",
+            "firecrawl_api_key": await _decrypt_config("browser.firecrawl_api_key"),
             "firecrawl_base_url": await Config.get("browser.firecrawl_base_url")
             or "https://api.firecrawl.dev",
-            "browser_use_api_key": await Config.get("browser.browser_use_api_key") or "",
+            "browser_use_api_key": await _decrypt_config("browser.browser_use_api_key"),
             "browser_use_base_url": await Config.get("browser.browser_use_base_url")
             or "https://api.browser-use.com",
         }

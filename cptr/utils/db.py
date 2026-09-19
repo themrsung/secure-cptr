@@ -40,6 +40,12 @@ async def init_db():
     async with get_engine().begin() as conn:
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
 
+    # Tighten permissions on the data dir every boot, so installs created
+    # before this was enforced get repaired rather than staying world-readable.
+    from cptr.utils.config import harden_data_dir
+
+    harden_data_dir()
+
     # Run Alembic migrations (sync, one-time startup cost)
     from alembic import command
     from alembic.config import Config

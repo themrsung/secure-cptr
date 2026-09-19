@@ -18,6 +18,19 @@ import os
 logger = logging.getLogger(__name__)
 
 
+async def _decrypt(value: object) -> str:
+    """Decrypt a stored provider key. Plain values pass through unchanged."""
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        from cptr.utils.config import _get_jwt_secret
+        from cptr.utils.crypto import decrypt_key
+
+        return decrypt_key(value, _get_jwt_secret()) or ""
+    except Exception:
+        return ""
+
+
 async def _get_key(env_var: str, config_key: str) -> str:
     """Check env var first, then DB config."""
     val = os.environ.get(env_var, "")
@@ -26,9 +39,14 @@ async def _get_key(env_var: str, config_key: str) -> str:
     try:
         from cptr.models import Config
 
-        return (await Config.get(config_key)) or ""
+        return await _decrypt(await Config.get(config_key))
     except Exception:
         return ""
+
+
+async def _get_secret_config(key: str) -> str:
+    """Read and decrypt a credential-bearing config value."""
+    return await _decrypt(await _get_config(key))
 
 
 async def _get_config(key: str) -> str:
@@ -70,7 +88,7 @@ async def web_search_handler(query: str) -> str:
     brave_key = await _get_key("BRAVE_API_KEY", "web.brave_api_key")
     firecrawl_key = await _get_key("FIRECRAWL_API_KEY", "web.firecrawl_api_key")
     if not firecrawl_key:
-        firecrawl_key = await _get_config("browser.firecrawl_api_key")
+        firecrawl_key = await _get_secret_config("browser.firecrawl_api_key")
     firecrawl_url = (await _get_config("web.firecrawl_base_url")) or os.environ.get(
         "FIRECRAWL_BASE_URL", ""
     )

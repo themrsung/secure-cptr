@@ -271,17 +271,26 @@ async def get_config_namespace(request: Request, namespace: str):
     return {"config": await Config.get_namespace(namespace)}
 
 
+def _is_secret_config_key(key: str) -> bool:
+    """Any config key naming a credential must be encrypted at rest.
+
+    This was previously a fixed allowlist of four audio/image keys, so the
+    web-search and browser provider keys were persisted in clear text - both
+    in the DB and, via `sync_config_to_toml`, in `config.toml`.
+    """
+    lowered = key.lower()
+    return lowered.endswith(("_api_key", "_secret", "_token", "_password")) or lowered.endswith(
+        ".api_key"
+    )
+
+
 def _prepare_config_updates(updates: dict) -> dict:
     """Normalize sensitive config values before persisting them."""
     prepared = dict(updates)
     secret = _get_jwt_secret()
-    for key in (
-        "audio.stt_api_key",
-        "audio.tts_api_key",
-        "images.generation_api_key",
-        "images.edit_api_key",
-    ):
-        value = prepared.get(key)
+    for key, value in list(prepared.items()):
+        if not _is_secret_config_key(key):
+            continue
         if isinstance(value, str) and value and not value.startswith("encrypted:"):
             prepared[key] = encrypt_key(value, secret)
     return prepared

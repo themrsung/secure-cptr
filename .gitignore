@@ -26,3 +26,6 @@ cptr/frontend/.svelte-kit/
 Thumbs.db
 
 .cptr
+
+# Local security audit workspace (not committed)
+.sec-audit/

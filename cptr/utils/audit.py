@@ -21,29 +21,71 @@ class AuditLevel(str, Enum):
     REQUEST_RESPONSE = "REQUEST_RESPONSE"
 
 
-_SENSITIVE_KEYS = {
+# Substrings: a key is redacted when any of these appears anywhere in its name.
+# Exact-match matching used to miss `current_password`, `new_password`, `ticket`,
+# `totp_secret`, `access_token`, `api_keys` (plural) and similar, which meant
+# real credentials were written to the audit log in plain text.
+_SENSITIVE_KEY_PARTS = (
     "password",
+    "passwd",
     "api_key",
+    "apikey",
     "token",
     "authorization",
     "cookie",
     "secret",
+    "credential",
+    "private_key",
+    "session",
+    "ticket",
+    "signature",
     "device_code",
     "user_code",
     "verification_uri",
-    "verification_uri_complete",
-}
+    "otp",
+    "mfa",
+    "2fa",
+    "salt",
+    "hash",
+)
+
+_REDACTED = "********"
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
 
 
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            k: "********" if k.lower() in _SENSITIVE_KEYS else _redact(v)
+            k: _REDACTED if _is_sensitive_key(str(k)) else _redact(v)
             for k, v in value.items()
         }
     if isinstance(value, list):
         return [_redact(v) for v in value]
     return value
+
+
+# Any key whose name contains a sensitive part, in JSON or form-encoded bodies.
+_KEY_PART_ALT = "|".join(re.escape(p) for p in _SENSITIVE_KEY_PARTS)
+
+# The closing quote is optional so that a body truncated mid-value at
+# max_body_size is still redacted rather than logged verbatim.
+_JSON_PAIR_RE = re.compile(
+    rf'("[^"]*(?:{_KEY_PART_ALT})[^"]*"\s*:\s*)"[^"]*("|$)',
+    re.IGNORECASE,
+)
+_FORM_PAIR_RE = re.compile(
+    rf'([A-Za-z0-9_.\[\]-]*(?:{_KEY_PART_ALT})[A-Za-z0-9_.\[\]-]*=)[^&\s]*',
+    re.IGNORECASE,
+)
+
+
+def _redact_text(text: str) -> str:
+    text = _JSON_PAIR_RE.sub(rf'\1"{_REDACTED}"', text)
+    return _FORM_PAIR_RE.sub(rf"\1{_REDACTED}", text)
 
 
 def _decode_body(body: bytearray) -> str | None:
@@ -53,14 +95,9 @@ def _decode_body(body: bytearray) -> str | None:
     try:
         return json.dumps(_redact(json.loads(text)), ensure_ascii=False, default=str)
     except Exception:
-        for key in _SENSITIVE_KEYS:
-            text = re.sub(
-                rf'("{re.escape(key)}"\s*:\s*")[^"]*(")',
-                r"\1********\2",
-                text,
-                flags=re.IGNORECASE,
-            )
-        return text
+        # Not valid JSON - e.g. form-encoded, or JSON truncated at max_body_size.
+        # Fall back to pattern redaction so secrets never reach the log verbatim.
+        return _redact_text(text)
 
 
 class AuditContext:

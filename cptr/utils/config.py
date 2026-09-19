@@ -5,6 +5,7 @@ SQLite handles user data (users, auths, user_states)."""
 
 from __future__ import annotations
 
+import os
 import secrets
 import time
 from dataclasses import dataclass
@@ -113,6 +114,38 @@ def _parse_simple_toml(text: str) -> dict:
     return result
 
 
+def harden_data_dir() -> None:
+    """Restrict the data directory and its secret-bearing files to the owner.
+
+    `config.toml` holds `server.secret`, which is both the JWT signing key and
+    the key the Fernet helpers in `cptr.utils.crypto` are derived from, so a
+    world-readable copy makes every "encrypted" value trivially recoverable.
+    `app.db` holds password hashes, sessions and encrypted keys.
+    """
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(DATA_DIR, 0o700)
+    except OSError:
+        return
+    for name in ("config.toml", "app.db", "app.db-wal", "app.db-shm"):
+        target = DATA_DIR / name
+        try:
+            if target.exists():
+                os.chmod(target, 0o600)
+        except OSError:
+            pass
+    # Chat transcripts and the audit/upstream logs are just as sensitive.
+    for sub in ("chats", "logs"):
+        directory = DATA_DIR / sub
+        try:
+            if directory.is_dir():
+                os.chmod(directory, 0o700)
+                for entry in directory.rglob("*"):
+                    os.chmod(entry, 0o700 if entry.is_dir() else 0o600)
+        except OSError:
+            pass
+
+
 def save_config(config: dict):
     global _config_cache
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -137,7 +170,15 @@ def save_config(config: dict):
                 else:
                     lines.append(f"{key_str} = {v}")
             lines.append("")
-    CONFIG_FILE.write_text("\n".join(lines))
+    # Create with 0600 from the start so the JWT secret is never briefly
+    # world-readable between write and chmod.
+    payload = "\n".join(lines).encode()
+    fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    harden_data_dir()
     _config_cache = config
 
 
@@ -444,7 +485,15 @@ def check_access(
         config = load_config()
         auth_cfg = config.get("auth", {})
         trusted_sources = auth_cfg.get("trusted_sources", [])
-        if trusted_sources and client_host not in trusted_sources:
+        # Fail closed. An empty allowlist used to mean "skip the IP check",
+        # which let anyone reach the server directly and become any user by
+        # sending a `Remote-User` header. A header is only trustworthy when
+        # we know the proxy that set it.
+        if not trusted_sources:
+            if remote_user_header:
+                return None
+            return verify_token(jwt_token) if jwt_token else None
+        if client_host not in trusted_sources:
             return None
         if remote_user_header:
             return AuthResult(username=remote_user_header)
