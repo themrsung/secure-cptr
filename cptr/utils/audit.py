@@ -154,9 +154,19 @@ class AuditLoggingMiddleware:
 
         context = AuditContext(self.max_body_size)
 
+        # File uploads arrive as multipart bodies. Capturing them copies the
+        # whole uploaded payload into the audit log - a second, longer-lived
+        # copy of whatever the user uploaded, which redaction cannot help with
+        # because the content is opaque. Record that the upload happened, not
+        # what was in it.
+        capture_request_body = not self._is_multipart(request)
+
         async def receive_wrapper() -> dict[str, Any]:
             message = await receive()
-            if self.audit_level in (AuditLevel.REQUEST, AuditLevel.REQUEST_RESPONSE):
+            if capture_request_body and self.audit_level in (
+                AuditLevel.REQUEST,
+                AuditLevel.REQUEST_RESPONSE,
+            ):
                 if message.get("type") == "http.request":
                     context.add_request(message.get("body", b""))
             return message
@@ -175,6 +185,10 @@ class AuditLoggingMiddleware:
             await self.app(scope, receive_wrapper, send_wrapper)
         finally:
             self._write_entry(request, context)
+
+    @staticmethod
+    def _is_multipart(request: Request) -> bool:
+        return request.headers.get("content-type", "").lower().startswith("multipart/")
 
     def _should_skip(self, request: Request) -> bool:
         if AUDIT_LOG_LEVEL == "NONE" or request.method not in self.AUDITED_METHODS:
