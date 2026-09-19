@@ -5,7 +5,7 @@
 	import EditUserModal from './EditUserModal.svelte';
 	import { onMount } from 'svelte';
 	import { listUsers, getAdminConfig, updateConfig } from '$lib/apis/admin';
-	import { session } from '$lib/session';
+	import { session, isAdminRole } from '$lib/session';
 	import { t } from '$lib/i18n';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import ToggleSwitch from '$lib/components/common/ToggleSwitch.svelte';
@@ -35,9 +35,7 @@
 	let totalPages = $derived(Math.max(1, Math.ceil(users.length / PAGE_SIZE)));
 	let pagedUsers = $derived(users.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));
 	// Superadmins count as admins: this guards "don't remove the last owner".
-	let adminCount = $derived(
-		users.filter((u) => u.role === 'admin' || u.role === 'superadmin').length
-	);
+	let adminCount = $derived(users.filter((u) => isAdminRole(u.role)).length);
 
 	async function loadUsers() {
 		try {

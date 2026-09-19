@@ -2,67 +2,44 @@
  * i18n setup using i18next (framework-agnostic, industry standard).
  *
  * Exports reactive `t` and `locale` Svelte stores for use in components.
- * Browser language detection via i18next-browser-languagedetector.
+ *
+ * The locale is pinned to en-US. Browser and OS language settings are ignored
+ * on purpose: this build is English-only, so detection could only ever pick a
+ * language with no bundle behind it and fall back anyway. The other locale
+ * files are kept in the tree so translations are not lost, but nothing loads
+ * them.
  */
 
 import i18next, { type TFunction } from 'i18next';
-import LanguageDetector from 'i18next-browser-languagedetector';
 import { writable, derived } from 'svelte/store';
 import en from './locales/en.json';
-import de from './locales/de.json';
-import es from './locales/es.json';
-import fr from './locales/fr.json';
-import ja from './locales/ja.json';
-import ko from './locales/ko.json';
-import ptBR from './locales/pt-BR.json';
-import ru from './locales/ru.json';
-import zhCN from './locales/zh-CN.json';
-import zhTW from './locales/zh-TW.json';
 
-export const supportedLocales = [
-	{ code: 'en', label: 'English' },
-	// Alphabetical by label below:
-	{ code: 'de', label: 'Deutsch' },
-	{ code: 'es', label: 'Español' },
-	{ code: 'fr', label: 'Français' },
-	{ code: 'pt-BR', label: 'Português (Brasil)' },
-	{ code: 'ru', label: 'Русский' },
-	{ code: 'ja', label: '日本語' },
-	{ code: 'ko', label: '한국어' },
-	{ code: 'zh-CN', label: '简体中文' },
-	{ code: 'zh-TW', label: '繁體中文' }
-] as const;
+/** The one locale this build ships. */
+export const LOCALE = 'en-US';
 
+export const supportedLocales = [{ code: LOCALE, label: 'English (US)' }] as const;
+
+// Registered under both tags so `en-US` is an exact hit and a bare `en`
+// lookup still resolves rather than falling through to a key name.
 const resources: Record<string, { translation: Record<string, string> }> = {
-	en: { translation: en },
-	de: { translation: de },
-	es: { translation: es },
-	fr: { translation: fr },
-	ja: { translation: ja },
-	ko: { translation: ko },
-	'pt-BR': { translation: ptBR },
-	ru: { translation: ru },
-	'zh-CN': { translation: zhCN },
-	'zh-TW': { translation: zhTW }
+	'en-US': { translation: en },
+	en: { translation: en }
 };
 
-i18next.use(LanguageDetector).init({
+i18next.init({
 	resources,
+	lng: LOCALE,
 	fallbackLng: 'en',
+	supportedLngs: [LOCALE, 'en'],
 	interpolation: {
 		escapeValue: false // Svelte handles escaping
-	},
-	detection: {
-		order: ['localStorage', 'navigator'],
-		caches: ['localStorage'],
-		lookupLocalStorage: 'cptr_locale'
 	}
 });
 
 // ── Svelte store wrapper ────────────────────────────────────────
 
 /** Writable store tracking the current locale code. */
-export const locale = writable<string>(i18next.language ?? 'en');
+export const locale = writable<string>(LOCALE);
 
 /**
  * Internal ticker that increments on every language change.
@@ -78,9 +55,14 @@ i18next.on('languageChanged', (lng: string) => {
 /** Reactive translation function: use as `$t('key')` or `$t('key', { count: 3 })` in templates. */
 export const t = derived(_tick, () => i18next.t.bind(i18next) as TFunction);
 
-/** Change the active locale. */
-export function changeLocale(lng: string): void {
-	i18next.changeLanguage(lng);
+/**
+ * No-op: the locale is pinned to en-US.
+ *
+ * Kept as a function so stored preferences and cross-tab broadcasts from older
+ * builds stay harmless instead of throwing.
+ */
+export function changeLocale(_lng?: string): void {
+	/* intentionally empty */
 }
 
 /**

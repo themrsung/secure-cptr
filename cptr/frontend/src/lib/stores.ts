@@ -27,7 +27,7 @@ import {
 } from '$lib/apis/state';
 import { listSessions, createSession, deleteSession } from '$lib/apis/terminal';
 import { createBrowserSession, deleteBrowserSession, listBrowserSessions } from '$lib/apis/browser';
-import { changeLocale, i18next } from '$lib/i18n';
+import { LOCALE, i18next } from '$lib/i18n';
 import { requestConfirm } from '$lib/stores/confirm';
 import { streamingChatTabs } from '$lib/stores/chat';
 import { keybindings, loadKeybindings } from '$lib/stores/keybindings';
@@ -452,7 +452,7 @@ function persistPreferences(): void {
 			sidebarOpen: get(sidebarOpen),
 			sidebarWidth: get(sidebarWidth),
 			toolApprovalMode: get(toolApprovalMode),
-			locale: i18next.language,
+			locale: LOCALE,
 			workspaceOrder: get(workspaceOrder),
 			keybindings: get(keybindings),
 			version: get(lastSeenVersion),
@@ -519,9 +519,6 @@ function subscribeForPersistence() {
 	expandToolDetails.subscribe(() => {
 		if (get(stateLoaded)) persistPreferences();
 	});
-	i18next.on('languageChanged', () => {
-		if (get(stateLoaded)) persistPreferences();
-	});
 }
 
 // ── Load preferences (called once at app startup) ───────────────
@@ -545,7 +542,8 @@ export async function loadPreferences(): Promise<void> {
 		} else if (prefs.autoApproveTools !== undefined) {
 			toolApprovalMode.set((prefs.autoApproveTools as boolean) ? 'full' : 'ask');
 		}
-		if (prefs.locale) changeLocale(prefs.locale as string);
+		// Locale is pinned to en-US; a stored preference from an older build is
+		// deliberately ignored rather than applied.
 		if (Array.isArray(prefs.workspaceOrder)) workspaceOrder.set(prefs.workspaceOrder as string[]);
 		if (prefs.keybindings) loadKeybindings(prefs.keybindings as Record<string, string>);
 		if (prefs.version) lastSeenVersion.set(prefs.version as string);
@@ -825,9 +823,8 @@ if (typeof BroadcastChannel !== 'undefined') {
 					normalizeBorderContrast(value.borderContrast) ??
 						(value.highContrastBorders === true ? 12 : null)
 				);
-			} else if (type === 'locale' && value) {
-				changeLocale(value);
 			}
+			// 'locale' broadcasts from older builds are ignored: pinned to en-US.
 		} finally {
 			_syncingFromBroadcast = false;
 		}
@@ -890,15 +887,7 @@ if (typeof BroadcastChannel !== 'undefined') {
 		}
 	});
 
-	// Locale changes are broadcast from changeLocale() calls;
-	// subscribe to i18next language changes.
-	if (i18next) {
-		i18next.on('languageChanged', (lng: string) => {
-			if (!_syncingFromBroadcast) {
-				channel.postMessage({ type: 'locale', value: lng });
-			}
-		});
-	}
+	// Locale is pinned to en-US, so there is nothing to broadcast between tabs.
 }
 
 // ── Workspace actions ───────────────────────────────────────────

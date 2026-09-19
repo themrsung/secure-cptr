@@ -54,7 +54,7 @@ EXPOSE 8000
 VOLUME ["/data"]
 
 ENTRYPOINT ["tini", "--"]
-CMD ["cptr", "run", "--host", "0.0.0.0", "--port", "8000", "--headless"]
+CMD ["scptr", "run", "--host", "0.0.0.0", "--port", "8000", "--headless"]
 
 
 # ── Browser image: Chromium for agent browser automation ───

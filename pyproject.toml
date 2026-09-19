@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-cptr = "cptr.cli:main"
+scptr = "cptr.cli:main"
 
 [build-system]
 requires = ["hatchling"]

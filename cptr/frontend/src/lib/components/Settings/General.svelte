@@ -8,8 +8,8 @@
 		latestVersion
 	} from '$lib/stores';
 	import type { StreamingBehavior } from '$lib/stores';
-	import { t, locale, changeLocale, supportedLocales } from '$lib/i18n';
-	import { session } from '$lib/session';
+	import { t } from '$lib/i18n';
+	import { session, isAdminRole } from '$lib/session';
 	import ToggleSwitch from '../common/ToggleSwitch.svelte';
 
 	interface Props {
@@ -125,18 +125,7 @@
 			</div>
 		</div>
 
-		<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2">{$t('general.language')}</h3>
-		<select
-			class="w-full max-w-[12.5rem] bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-1 cursor-pointer"
-			value={$locale}
-			onchange={(e) => changeLocale((e.currentTarget as HTMLSelectElement).value)}
-		>
-			{#each supportedLocales as loc}
-				<option value={loc.code}>{loc.label}</option>
-			{/each}
-		</select>
-
-		{#if $session?.role === 'admin'}
+		{#if isAdminRole($session?.role)}
 			<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2 mt-5">{$t('general.updates')}</h3>
 			<label class="flex items-center justify-between cursor-pointer">
 				<span class="text-xs text-gray-600 dark:text-gray-400"

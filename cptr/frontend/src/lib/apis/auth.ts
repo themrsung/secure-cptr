@@ -24,7 +24,7 @@ interface SessionResponse {
  * instead of a session, and the second step exchanges the ticket for one.
  */
 export interface TotpChallenge {
-	/** First sign-in, or after `cptr recovery reset`: enrol a new secret. */
+	/** First sign-in, or after `scptr recovery reset`: enrol a new secret. */
 	totp_enrollment?: true;
 	/** Steady state: the client just collects six digits. */
 	totp_required?: true;

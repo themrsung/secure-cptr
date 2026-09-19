@@ -31,6 +31,14 @@ export function setSession(s: Session | null) {
 }
 
 /**
+ * Whether a role is admin-tier. Superadmins are admins too — comparing the
+ * role by equality silently locks the box owner out of their own settings.
+ */
+export function isAdminRole(role: string | null | undefined): boolean {
+	return role === 'admin' || role === 'superadmin';
+}
+
+/**
  * Whether the signed-in account holds a capability.
  *
  * Presentation only — every one of these is re-checked server-side on the

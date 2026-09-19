@@ -56,7 +56,7 @@ UPSTREAM_REQUEST_LOG_ROTATION = os.environ.get("CPTR_UPSTREAM_REQUEST_LOG_ROTATI
 STARTUP_TOKEN: str | None = os.environ.pop("CPTR_STARTUP_TOKEN", None)
 
 # -- TLS ------------------------------------------------------------
-# Set by `cptr run` when it serves HTTPS. Drives the Secure cookie flag and
+# Set by `scptr run` when it serves HTTPS. Drives the Secure cookie flag and
 # the HSTS header; both must stay off over plain HTTP or loopback dev breaks.
 TLS_ENABLED: bool = _env_bool("CPTR_TLS", "false")
 

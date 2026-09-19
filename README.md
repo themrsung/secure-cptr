@@ -12,7 +12,7 @@
 
 ![Open WebUI Computer Demo](./demo.png)
 
-Open WebUI Computer (`cptr`) runs on your machine and serves your whole computer to any browser: files, terminal, editor, git, browser tabs, running sessions, AI agents, and tools. It literally is your computer.
+Open WebUI Computer (`scptr`) runs on your machine and serves your whole computer to any browser: files, terminal, editor, git, browser tabs, running sessions, AI agents, and tools. It literally is your computer.
 
 Use it from your phone, tablet, laptop, another computer, or the machine it's running on. Designed to feel native on every screen. Connect your own AI via API key, plug in a coding agent you already subscribe to, or work directly in the terminal. One tool, full workstation, any device.
 
@@ -22,25 +22,26 @@ Use it from your phone, tablet, laptop, another computer, or the machine it's ru
 
 ```bash
 pip install cptr
-cptr run
+scptr run
 ```
 
 MCP tool servers require the optional MCP dependencies: `pip install 'cptr[mcp]'`.
 To install every optional feature group, use `pip install 'cptr[all]'`.
 The Docker image includes all optional feature groups.
 
-Or with [uv](https://docs.astral.sh/uv/): `uvx cptr@latest run`
+Or with [uv](https://docs.astral.sh/uv/): `uvx --from cptr@latest scptr run`
 
-On Windows, if opening a terminal reports a missing `VCRUNTIME140.dll` or Universal CRT DLL, install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and restart `cptr`.
+On Windows, if opening a terminal reports a missing `VCRUNTIME140.dll` or Universal CRT DLL, install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and restart `scptr`.
 
-Opens in your browser at `http://localhost:8000`.
+Opens in your browser at `https://localhost:8000`. TLS is on by default; see
+[Security model](#security-model).
 
 ### Access from your phone
 
 Same Wi-Fi? Bind to all interfaces:
 
 ```bash
-cptr run --host 0.0.0.0
+scptr run --host 0.0.0.0
 ```
 
 Open `http://<your-computer-ip>:8000` on your phone.
@@ -51,7 +52,7 @@ Not on the same network? Use a tunnel to reach your machine remotely:
 - **[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)** gives you a permanent URL through Cloudflare's edge.
 - **[ngrok](https://ngrok.com)** gives you a public URL in one command.
 
-Most tunnels forward to `localhost`, so the default `cptr run` works. If your tunnel connects to a specific interface, bind accordingly with `--host`.
+Most tunnels forward to `localhost`, so the default `scptr run` works. If your tunnel connects to a specific interface, bind accordingly with `--host`.
 
 Or skip networking entirely and connect a [messaging bot](#messaging-bots) instead.
 
@@ -167,7 +168,7 @@ docker run --rm -it \
   ghcr.io/open-webui/computer:latest
 ```
 
-Then open the URL printed in the logs, usually `http://localhost:8000/?token=...`.
+Then open the URL printed in the logs, usually `https://localhost:8000/?token=...`.
 
 Open WebUI Computer stores its state in `/data`. Mount your project into the container, like `-v "$PWD:/workspace"`, so Open WebUI Computer can access it.
 The default image includes Git and GitHub CLI (`gh`). Use `ghcr.io/open-webui/computer:browser` when agent browser automation needs Chromium.
@@ -202,7 +203,7 @@ Transfer the artifacts, then install or run offline:
 python -m venv .venv
 . .venv/bin/activate
 pip install --no-index --find-links ./wheelhouse 'cptr[all]'
-cptr run --host 0.0.0.0
+scptr run --host 0.0.0.0
 
 docker load -i cptr-image.tar
 docker run --rm -it \
@@ -218,9 +219,54 @@ Core local features run from local assets. External services such as hosted mode
 
 ## Security model
 
-Open WebUI Computer is designed as **your computer, served to you**. Once authenticated, a user has full access to the host filesystem and shell, equivalent to an SSH session. There is no path sandboxing and no per-user isolation.
+This fork tightens the upstream model, which assumed a single trusted operator.
 
-This is safe when you are the only user and you control the network. It is not safe if untrusted users share the instance, it is exposed to the public internet, or a reverse proxy forwards spoofable auth headers. Treat a shared Open WebUI Computer like an open SSH port.
+**Two factors, always.** Every account enrols a TOTP authenticator at its first
+sign-in; the secret and QR code are shown once and never again. A password on
+its own never returns a session. Lost your authenticator? Recover from a shell
+on the host, where filesystem access to the database is itself the
+authorisation:
+
+```bash
+scptr recovery list
+scptr recovery reset <username>     # re-enrol at the next sign-in
+scptr recovery promote <username>   # break-glass superadmin
+scptr recovery capabilities <username> --grant machine --revoke terminal
+```
+
+**Encrypted transport.** `scptr run` serves HTTPS and provisions its own
+certificate into `~/.cptr/certs`. If [mkcert](https://github.com/FiloSottile/mkcert)
+is installed it is used, so the certificate is already trusted and no browser
+warning appears; otherwise it is self-signed and you accept it once. `--no-tls`
+exists for loopback development and warns when bound to anything else.
+
+**Capabilities, not blanket access.** An account holds any combination of three
+independent grants, and a new account holds none of them — it can chat and
+nothing more.
+
+| Capability | Unlocks |
+| --- | --- |
+| `terminal` | An interactive shell on the host machine |
+| `machine` | Workspaces, files, git, browser control, agent shell tools |
+| `external` | Remote MCP and external tool-server connectors |
+
+Admins hold all three implicitly. Grants are read from the database on each
+request, so revoking one takes effect in seconds rather than waiting out a
+session.
+
+**The terminal costs a second code.** Holding `terminal` only gets you to a
+prompt. A valid code opens a 30-minute idle window, refreshed by traffic in
+either direction — a long build that keeps printing never locks itself out.
+When it lapses the connection closes but the shell keeps running, so nothing
+in flight is lost.
+
+**Tiers.** The first account to set the instance up becomes superadmin. Only a
+superadmin grants or revokes admin; admins manage everyone else. The last admin
+cannot be demoted or deleted, and if the admin tier ever shrinks to one account
+that account is promoted to superadmin automatically.
+
+What has *not* changed: an account with `machine` or `terminal` still has real
+reach into the host, with no path sandboxing. Grant those deliberately.
 
 ## License
 

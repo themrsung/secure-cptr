@@ -205,7 +205,7 @@ async def _second_factor_challenge(user_id: str, username: str) -> JSONResponse:
     Two shapes come back, both carrying a 5-minute ticket rather than a
     cookie:
 
-    * `totp_enrollment` — first sign-in (or after `cptr recovery reset`).
+    * `totp_enrollment` — first sign-in (or after `scptr recovery reset`).
       The secret, `otpauth://` URI and a QR code are shown once, here, and
       never again.
     * `totp_required` — steady state; the client just collects six digits.

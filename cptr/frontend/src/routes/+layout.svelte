@@ -38,7 +38,7 @@
 	import { matchKeybinding, executeAction } from '$lib/stores/keybindings';
 	import { systemEvents } from '$lib/stores/systemEvents.svelte';
 	import { socketStore } from '$lib/stores/socket.svelte';
-	import { setSession, setElevated, clearSession, session } from '$lib/session';
+	import { setSession, setElevated, clearSession, session, isAdminRole } from '$lib/session';
 	import { getSession, getConfig } from '$lib/apis/auth';
 	import { fetchJSON } from '$lib/apis';
 	import { getGitConfig } from '$lib/apis/git';
@@ -176,7 +176,7 @@
 		if (authState !== 'authenticated') return;
 
 		const params = new URLSearchParams(window.location.search);
-		if (params.get('setup') === 'true' && $session?.role === 'admin') {
+		if (params.get('setup') === 'true' && isAdminRole($session?.role)) {
 			showSetup = true;
 			const url = new URL(window.location.href);
 			url.searchParams.delete('setup');
@@ -278,7 +278,7 @@
 	async function checkForUpdates() {
 		try {
 			const sess = $session;
-			if (!sess || sess.role !== 'admin') return;
+			if (!sess || !isAdminRole(sess.role)) return;
 			if (!$showUpdateToastPref) return;
 
 			// 24-hour dismiss cooldown

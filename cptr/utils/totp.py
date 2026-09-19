@@ -43,7 +43,7 @@ def _hotp(secret: str, counter: int) -> str:
 
 
 def now_code(secret: str, at: float | None = None) -> str:
-    """Current TOTP code. Exposed for `cptr recovery` / tests."""
+    """Current TOTP code. Exposed for `scptr recovery` / tests."""
     return _hotp(secret, int((at if at is not None else time.time()) // PERIOD))
 
 

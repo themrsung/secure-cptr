@@ -20,7 +20,7 @@ export interface AdminUser {
 	capabilities: Capabilities;
 	/** Whether a second factor is enrolled and confirmed. */
 	totp_enabled: boolean;
-	/** Set by `cptr recovery reset`: re-enrols at the next sign-in. */
+	/** Set by `scptr recovery reset`: re-enrols at the next sign-in. */
 	totp_reset_required: boolean;
 }
 

@@ -27,7 +27,7 @@
 	import ToolServers from './Admin/ToolServers.svelte';
 	import Subagents from './Admin/Subagents.svelte';
 	import Workspace from './Admin/Workspace.svelte';
-	import { session } from '$lib/session';
+	import { session, isAdminRole } from '$lib/session';
 	import { t } from '$lib/i18n';
 
 	type Tab =
@@ -103,7 +103,7 @@
 	);
 	let showPwaSettings = $state(false);
 
-	const isAdmin = $derived($session?.role === 'admin');
+	const isAdmin = $derived(isAdminRole($session?.role));
 	const tr = (key: string) => (get(t) as (key: string) => string)(key);
 
 	type SettingsTab = { id: Tab; label: string; icon: string };
@@ -167,7 +167,7 @@
 			activeTab = 'pwa';
 		} else if (
 			!$session ||
-			($session.role !== 'admin' && adminTabIds.includes(normalizeTab(initialTab)))
+			(!isAdminRole($session.role) && adminTabIds.includes(normalizeTab(initialTab)))
 		) {
 			activeTab = 'general';
 		} else if (initialTab === 'git' && !gitSettingsAvailable) {

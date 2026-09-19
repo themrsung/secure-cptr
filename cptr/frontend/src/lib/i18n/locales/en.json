@@ -1278,7 +1278,7 @@
 	"auth.totpHint": "Enter the 6-digit code from your authenticator app.",
 	"auth.totpEnrollTitle": "Set up two-factor authentication",
 	"auth.totpEnrollHint": "Scan this with your authenticator app, then enter the code it shows.",
-	"auth.totpEnrollWarning": "This code is shown only once. If you lose it, run `cptr recovery reset <username>` on the host to enrol again.",
+	"auth.totpEnrollWarning": "This code is shown only once. If you lose it, run `scptr recovery reset <username>` on the host to enrol again.",
 	"auth.totpEnrollBtn": "Confirm & continue →",
 	"auth.totpVerifyBtn": "Verify →",
 	"auth.totpCode": "Authentication code",
