@@ -19,6 +19,7 @@
 		activeTab,
 		activeHomeTab,
 		currentWorkspace,
+		openTerminalTab,
 		stateLoaded,
 		initState,
 		gitReviewOpen,
@@ -37,7 +38,7 @@
 	import { matchKeybinding, executeAction } from '$lib/stores/keybindings';
 	import { systemEvents } from '$lib/stores/systemEvents.svelte';
 	import { socketStore } from '$lib/stores/socket.svelte';
-	import { setSession, clearSession, session } from '$lib/session';
+	import { setSession, setElevated, clearSession, session } from '$lib/session';
 	import { getSession, getConfig } from '$lib/apis/auth';
 	import { fetchJSON } from '$lib/apis';
 	import { getGitConfig } from '$lib/apis/git';
@@ -53,6 +54,22 @@
 	import SetupWizard from '$lib/components/SetupWizard.svelte';
 
 	let { children } = $props();
+
+	/**
+	 * Open a host terminal from the sidebar.
+	 *
+	 * Inside a workspace it becomes a tab there; on the home view the page owns
+	 * the tab groups, so we hand off over the existing home-action bus. The
+	 * elevation check already happened in the sidebar, and the server re-checks
+	 * it on both the create call and the socket.
+	 */
+	function openHostTerminal() {
+		if ($currentWorkspace) {
+			void openTerminalTab();
+		} else if (typeof window !== 'undefined') {
+			window.dispatchEvent(new CustomEvent('cptr:home-action', { detail: 'newTerminal' }));
+		}
+	}
 	let showSettings = $state(false);
 	let settingsTab = $state('general');
 	let showUpdateToast = $state(false);
@@ -193,8 +210,12 @@
 					username: auth.username!,
 					display_name: auth.display_name,
 					role: auth.role!,
-					profile_image_url: auth.profile_image_url
+					profile_image_url: auth.profile_image_url,
+					capabilities: auth.capabilities ?? [],
+					elevated: auth.elevated,
+					elevation_expires_at: auth.elevation_expires_at
 				});
+				setElevated(!!auth.elevated);
 				await refreshGitSettingsAvailability();
 				authState = 'authenticated';
 				initState();
@@ -228,8 +249,12 @@
 					username: auth.username!,
 					display_name: auth.display_name,
 					role: auth.role!,
-					profile_image_url: auth.profile_image_url
+					profile_image_url: auth.profile_image_url,
+					capabilities: auth.capabilities ?? [],
+					elevated: auth.elevated,
+					elevation_expires_at: auth.elevation_expires_at
 				});
+				setElevated(!!auth.elevated);
 				await refreshGitSettingsAvailability();
 				authState = 'authenticated';
 				initState();
@@ -483,7 +508,7 @@
 		class="app-theme h-screen max-h-[100dvh] flex overflow-hidden font-sans antialiased text-gray-900 bg-white dark:text-gray-100 dark:bg-black"
 		style="background: var(--app-bg); color: var(--app-fg);"
 	>
-		<Sidebar {gitSettingsAvailable} />
+		<Sidebar {gitSettingsAvailable} onopenterminal={openHostTerminal} />
 
 		<div
 			id="main-col"

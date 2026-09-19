@@ -11,6 +11,28 @@ interface SessionResponse {
 	role?: string;
 	profile_image_url?: string | null;
 	exp?: number;
+	/** What this account may reach: 'terminal' | 'machine' | 'external'. */
+	capabilities?: string[];
+	/** Whether a terminal elevation window is currently open. */
+	elevated?: boolean;
+	/** When that window lapses, in ms since epoch. */
+	elevation_expires_at?: number | null;
+}
+
+/**
+ * A password is never enough on its own. `/login` answers with one of these
+ * instead of a session, and the second step exchanges the ticket for one.
+ */
+export interface TotpChallenge {
+	/** First sign-in, or after `cptr recovery reset`: enrol a new secret. */
+	totp_enrollment?: true;
+	/** Steady state: the client just collects six digits. */
+	totp_required?: true;
+	ticket: string;
+	/** Enrolment only — shown once and never again. */
+	secret?: string;
+	uri?: string;
+	qr_svg?: string;
 }
 
 interface ConfigResponse {
@@ -25,10 +47,27 @@ export const getSession = () => fetchJSON<SessionResponse>('/api/auth');
 export const getConfig = () => fetchJSON<ConfigResponse>('/api/config');
 
 export const login = (username: string, password: string) =>
-	fetchJSON('/api/auth/login', jsonBody({ username, password }));
+	fetchJSON<TotpChallenge>('/api/auth/login', jsonBody({ username, password }));
 
 export const setup = (username: string, password: string, token: string) =>
-	fetchJSON('/api/auth/setup', jsonBody({ username, password, token }));
+	fetchJSON<TotpChallenge>('/api/auth/setup', jsonBody({ username, password, token }));
+
+/** Second step of login: trade the ticket plus six digits for a session. */
+export const loginTotp = (ticket: string, code: string) =>
+	fetchJSON<{ ok: boolean; username: string; enrolled: boolean }>(
+		'/api/auth/login/totp',
+		jsonBody({ ticket, code })
+	);
+
+/** Re-enter a code to open a terminal elevation window. */
+export const elevate = (code: string) =>
+	fetchJSON<{ ok: boolean; expires_at: number }>('/api/auth/elevate', jsonBody({ code }));
+
+/** Whether an elevation window is currently open, and until when. */
+export const elevationStatus = () =>
+	fetchJSON<{ elevated: boolean; expires_at: number | null; capabilities: string[] }>(
+		'/api/auth/elevation'
+	);
 
 export const signup = (username: string, password: string) =>
 	fetchJSON<{ ok?: boolean; pending?: boolean }>(

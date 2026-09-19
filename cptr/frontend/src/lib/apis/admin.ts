@@ -3,6 +3,13 @@
  */
 import { fetchJSON, jsonBody } from '$lib/apis';
 
+/** Independent capability grants. Admins hold all of them implicitly. */
+export interface Capabilities {
+	terminal: boolean;
+	machine: boolean;
+	external: boolean;
+}
+
 export interface AdminUser {
 	user_id: string;
 	username: string;
@@ -10,6 +17,11 @@ export interface AdminUser {
 	profile_image_url: string | null;
 	role: string;
 	created_at: number;
+	capabilities: Capabilities;
+	/** Whether a second factor is enrolled and confirmed. */
+	totp_enabled: boolean;
+	/** Set by `cptr recovery reset`: re-enrols at the next sign-in. */
+	totp_reset_required: boolean;
 }
 
 export const listUsers = async (): Promise<AdminUser[]> => {
@@ -26,6 +38,13 @@ export const deleteUser = (userId: string) =>
 export const updateRole = (userId: string, role: string) =>
 	fetchJSON(`/api/admin/users/${userId}/role`, {
 		...jsonBody({ role }),
+		method: 'PUT'
+	});
+
+/** Grant or revoke capability flags. Only meaningful on non-admin accounts. */
+export const updateCapabilities = (userId: string, capabilities: Partial<Capabilities>) =>
+	fetchJSON<{ ok: boolean; capabilities: string[] }>(`/api/admin/users/${userId}/capabilities`, {
+		...jsonBody({ capabilities }),
 		method: 'PUT'
 	});
 

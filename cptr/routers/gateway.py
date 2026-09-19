@@ -33,6 +33,7 @@ from cptr.models import Auth, Chat, ChatMessage, Config
 from cptr.models.workspaces import Workspace
 from cptr.utils.agents.prompts import message_text
 from cptr.utils.config import AuthResult, now_ms
+from cptr.utils.permissions import ROLE_PENDING, resolve
 from cptr.utils.runtime import Runtime, FileError
 
 logger = logging.getLogger(__name__)
@@ -92,9 +93,16 @@ async def _authenticate(request: Request) -> str:
             if not user_id:
                 raise HTTPException(500, "API key has no user_id")
             auth_row = await Auth.get_by_user_id(user_id)
+            # A key is only ever as good as the account behind it. Roles are
+            # read live, so revoking an account closes its keys in seconds
+            # without anyone having to hunt them down and delete them.
+            role, _ = await resolve(user_id)
+            if role == ROLE_PENDING:
+                raise HTTPException(403, "Account is not approved")
             request.state.auth = AuthResult(
                 user_id=user_id,
                 username=auth_row.username if auth_row else None,
+                role=role,
             )
             return user_id
 
@@ -807,16 +815,27 @@ class CreateApiKeyRequest(BaseModel):
     name: str = "default"
 
 
-@router.post("/keys")
-async def create_api_key(request: Request, body: CreateApiKeyRequest):
-    """Create a new API key (requires cookie auth, admin only)."""
+def _cookie_auth(request: Request) -> AuthResult:
+    """Session auth for the key-management endpoints.
+
+    These live under `/v1`, which the auth middleware skips, so they have to ask
+    for themselves. Keys are personal — each one carries only its owner's
+    capabilities — so any signed-in account may manage its own.
+    """
     from cptr.utils.config import check_access
 
     client_host = request.client.host if request.client else "127.0.0.1"
     jwt_token = request.cookies.get("cptr_session")
     auth = check_access(client_host=client_host, jwt_token=jwt_token)
     if not auth or not auth.user_id:
-        raise HTTPException(401, "Admin authentication required")
+        raise HTTPException(401, "Authentication required")
+    return auth
+
+
+@router.post("/keys")
+async def create_api_key(request: Request, body: CreateApiKeyRequest):
+    """Create an API key bound to the signed-in account."""
+    auth = _cookie_auth(request)
 
     raw = f"sk-cptr-{secrets.token_urlsafe(32)}"
     entry = {
@@ -835,14 +854,8 @@ async def create_api_key(request: Request, body: CreateApiKeyRequest):
 
 @router.get("/keys")
 async def list_api_keys(request: Request):
-    """List API keys (masked). Requires cookie auth."""
-    from cptr.utils.config import check_access
-
-    client_host = request.client.host if request.client else "127.0.0.1"
-    jwt_token = request.cookies.get("cptr_session")
-    auth = check_access(client_host=client_host, jwt_token=jwt_token)
-    if not auth or not auth.user_id:
-        raise HTTPException(401, "Admin authentication required")
+    """List your own API keys (masked). Requires cookie auth."""
+    auth = _cookie_auth(request)
 
     keys = await _get_api_keys()
     return [
@@ -852,22 +865,21 @@ async def list_api_keys(request: Request):
             "created_at": k.get("created_at"),
         }
         for k in keys
+        if k.get("user_id") == auth.user_id
     ]
 
 
 @router.delete("/keys/{key_id}")
 async def delete_api_key(request: Request, key_id: str):
-    """Delete an API key. Requires cookie auth."""
-    from cptr.utils.config import check_access
-
-    client_host = request.client.host if request.client else "127.0.0.1"
-    jwt_token = request.cookies.get("cptr_session")
-    auth = check_access(client_host=client_host, jwt_token=jwt_token)
-    if not auth or not auth.user_id:
-        raise HTTPException(401, "Admin authentication required")
+    """Delete one of your own API keys. Requires cookie auth."""
+    auth = _cookie_auth(request)
 
     keys = await _get_api_keys()
-    filtered = [k for k in keys if k.get("id") != key_id]
+    # A key you cannot see is a key you cannot delete: an unowned id reads as
+    # absent rather than forbidden, so this does not confirm it exists.
+    filtered = [
+        k for k in keys if not (k.get("id") == key_id and k.get("user_id") == auth.user_id)
+    ]
     if len(filtered) == len(keys):
         raise HTTPException(404, "Key not found")
     await _save_api_keys(filtered)

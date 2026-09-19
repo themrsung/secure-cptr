@@ -303,6 +303,11 @@ def _get_jwt_secret() -> str:
     return secret
 
 
+TOKEN_TYPE_SESSION = "session"
+TICKET_MAX_AGE = 5 * 60
+"""How long a half-finished login may sit before the user starts over."""
+
+
 def create_token(user_id: str, username: str, role: str = "user") -> str:
     """Create a signed JWT per RFC 7519. Includes standard claims:
     - sub: subject (user_id)
@@ -316,6 +321,7 @@ def create_token(user_id: str, username: str, role: str = "user") -> str:
             "sub": user_id,
             "username": username,
             "role": role,
+            "typ": TOKEN_TYPE_SESSION,
             "exp": time.time() + SESSION_MAX_AGE,
             "jti": str(uuid.uuid4()),
         },
@@ -325,9 +331,17 @@ def create_token(user_id: str, username: str, role: str = "user") -> str:
 
 
 def verify_token(token: str) -> AuthResult | None:
-    """Verify a JWT. No DB read."""
+    """Verify a session JWT. No DB read.
+
+    Tokens carrying any other `typ` — notably the short-lived tickets minted
+    between the password and TOTP steps — are rejected here, so a half-finished
+    login can never be presented as a session cookie.
+    """
     try:
         payload = jwt.decode(token, _get_jwt_secret(), algorithms=["HS256"])
+        # Tokens issued before `typ` existed are sessions; don't log them out.
+        if payload.get("typ", TOKEN_TYPE_SESSION) != TOKEN_TYPE_SESSION:
+            return None
         return AuthResult(
             user_id=payload.get("sub"),
             username=payload.get("username"),
@@ -336,6 +350,48 @@ def verify_token(token: str) -> AuthResult | None:
         )
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         return None
+
+
+# ── Purpose-scoped tickets ───────────────────────────────────
+
+
+def create_ticket(user_id: str, username: str, purpose: str, **claims) -> str:
+    """Mint a short-lived, single-purpose token.
+
+    Used to carry proof that the password step succeeded into the TOTP step
+    without ever handing out a usable session.
+    """
+    import uuid
+
+    return jwt.encode(
+        {
+            "sub": user_id,
+            "username": username,
+            "typ": purpose,
+            "exp": time.time() + TICKET_MAX_AGE,
+            "jti": str(uuid.uuid4()),
+            **claims,
+        },
+        _get_jwt_secret(),
+        algorithm="HS256",
+    )
+
+
+def verify_ticket(token: str | None, purpose: str) -> dict | None:
+    """Verify a ticket minted by `create_ticket`, returning its claims.
+
+    The `typ` must match exactly, so a ticket for one step cannot be replayed
+    at another.
+    """
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, _get_jwt_secret(), algorithms=["HS256"])
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
+    if payload.get("typ") != purpose or not payload.get("sub"):
+        return None
+    return payload
 
 
 # ── Rate Limiting (in-memory, fine) ──────────────────────────

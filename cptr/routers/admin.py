@@ -13,6 +13,18 @@ from cptr.utils.config import AuthResult, _get_jwt_secret, check_access, hash_pa
 from cptr.utils.crypto import decrypt_key, encrypt_key, mask_key
 from cptr.utils.agents.detection import get_agent_status, invalidate_agent_detection_cache
 from cptr.utils.agents.models import save_agent_profiles
+from cptr.utils.elevation import revoke
+from cptr.utils.permissions import (
+    ALL_CAPABILITIES,
+    ASSIGNABLE_ROLES,
+    CAP_TERMINAL,
+    ROLE_ADMIN,
+    ROLE_SUPERADMIN,
+    ROLE_USER,
+    is_admin,
+    is_superadmin,
+    resolve,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -20,13 +32,48 @@ COOKIE_NAME = "cptr_session"
 
 
 def require_admin(request: Request) -> AuthResult:
-    """Extract auth from cookie, raise 403 if not admin."""
+    """Extract auth from cookie, raise 403 unless the caller is an admin.
+
+    Superadmins are admins too. The role on the JWT can be up to 30 days
+    stale, so it is only a fast reject here; `require_tier` re-reads the
+    database for anything that actually changes another account.
+    """
     token = request.cookies.get(COOKIE_NAME)
     client_host = request.client.host if request.client else "127.0.0.1"
     auth = check_access(client_host=client_host, jwt_token=token)
-    if not auth or auth.role != "admin":
+    if not auth or not is_admin(auth.role):
         raise HTTPException(403, "admin required")
     return auth
+
+
+async def require_tier(request: Request, *, superadmin: bool = False) -> tuple[AuthResult, str]:
+    """Authorise against the *current* role in the database.
+
+    Returns `(auth, role)`. Use this — not the JWT role — whenever the outcome
+    grants or removes access, so that a demotion takes effect immediately
+    instead of lingering for the life of a session.
+    """
+    auth = require_admin(request)
+    role, _ = await resolve(auth.user_id)
+    if not is_admin(role):
+        raise HTTPException(403, "admin required")
+    if superadmin and not is_superadmin(role):
+        raise HTTPException(403, "superadmin required")
+    return auth, role
+
+
+async def reconcile_superadmin() -> None:
+    """Keep exactly one owner of the box.
+
+    Rule: when the admin tier shrinks to a single account, that account is
+    promoted to superadmin automatically — no manual command. This runs after
+    every role change and every deletion, so the box can never end up with
+    admins but nobody able to grant admin.
+    """
+    admins = await User.list_by_role(ROLE_ADMIN)
+    supers = await User.list_by_role(ROLE_SUPERADMIN)
+    if not supers and len(admins) == 1:
+        await User.update_role(admins[0].id, ROLE_SUPERADMIN)
 
 
 # ── Users ────────────────────────────────────────────────────
@@ -42,14 +89,19 @@ async def list_users(request: Request):
 @router.post("/users")
 async def create_user(request: Request, body: CreateUserRequest):
     """Create a new user (admin only)."""
-    require_admin(request)
+    _, actor_role = await require_tier(request)
 
     if not body.username or not body.username.strip():
         return JSONResponse({"error": "username required"}, 400)
     if not body.password or len(body.password.strip()) < 6:
         return JSONResponse({"error": "min 6 characters"}, 400)
-    if body.role not in ("admin", "user", "pending"):
-        return JSONResponse({"error": "role must be admin, user, or pending"}, 400)
+    if body.role not in ASSIGNABLE_ROLES:
+        return JSONResponse(
+            {"error": f"role must be one of {', '.join(ASSIGNABLE_ROLES)}"}, 400
+        )
+    # Only a superadmin may mint another admin-tier account.
+    if is_admin(body.role) and not is_superadmin(actor_role):
+        return JSONResponse({"error": "only a superadmin can create an admin"}, 403)
 
     username = body.username.strip()
     if await Auth.username_exists(username):
@@ -67,22 +119,109 @@ async def create_user(request: Request, body: CreateUserRequest):
 @router.delete("/users/{user_id}")
 async def delete_user(request: Request, user_id: str):
     """Delete a user. Cannot delete yourself."""
-    auth = require_admin(request)
+    auth, actor_role = await require_tier(request)
     if auth.user_id == user_id:
         return JSONResponse({"error": "cannot delete yourself"}, 400)
+
+    target = await User.get_by_id(user_id)
+    if target is None:
+        return JSONResponse({"error": "user not found"}, 404)
+    if is_admin(target.role) and not is_superadmin(actor_role):
+        return JSONResponse({"error": "only a superadmin can remove an admin"}, 403)
+
     await User.delete_user(user_id)
+    revoke(user_id)
+    await reconcile_superadmin()
     return {"ok": True}
 
 
 @router.put("/users/{user_id}/role")
 async def update_role(request: Request, user_id: str, body: RoleRequest):
-    """Update a user's role."""
-    require_admin(request)
-    if body.role not in ("admin", "user", "pending"):
-        return JSONResponse({"error": "role must be admin, user, or pending"}, 400)
+    """Update a user's role.
+
+    Tier rules:
+      * Only a superadmin may grant or revoke admin, or hand over superadmin.
+      * An admin may move accounts between `user` and `pending`, but may not
+        touch any account that is itself admin or superadmin.
+      * The last admin cannot be demoted — there must always be an owner.
+    """
+    actor, actor_role = await require_tier(request)
+    if body.role not in ASSIGNABLE_ROLES:
+        return JSONResponse(
+            {"error": f"role must be one of {', '.join(ASSIGNABLE_ROLES)}"}, 400
+        )
+
+    target = await User.get_by_id(user_id)
+    if target is None:
+        return JSONResponse({"error": "user not found"}, 404)
+    target_role = target.role or ROLE_USER
+
+    if not is_superadmin(actor_role):
+        # Admins may not create, remove, or alter admin-tier accounts.
+        if is_admin(target_role) or is_admin(body.role):
+            return JSONResponse({"error": "only a superadmin can change admin status"}, 403)
+
+    if is_admin(target_role) and not is_admin(body.role):
+        remaining = len(await User.list_by_role(ROLE_ADMIN)) + len(
+            await User.list_by_role(ROLE_SUPERADMIN)
+        )
+        if remaining <= 1:
+            return JSONResponse({"error": "cannot demote the last admin"}, 400)
+
+    # Handing over superadmin: the outgoing owner stays on as a plain admin
+    # rather than silently leaving two owners behind.
+    if body.role == ROLE_SUPERADMIN and actor.user_id != user_id:
+        await User.update_role(actor.user_id, ROLE_ADMIN)
+
     if not await User.update_role(user_id, body.role):
         return JSONResponse({"error": "user not found"}, 404)
+
+    # Losing admin means losing every implicit capability, and any terminal
+    # elevation that rode on it.
+    if is_admin(target_role) and not is_admin(body.role):
+        revoke(user_id)
+
+    await reconcile_superadmin()
     return {"ok": True}
+
+
+@router.put("/users/{user_id}/capabilities")
+async def update_capabilities(request: Request, user_id: str, body: CapabilitiesRequest):
+    """Grant or revoke the independent capability flags.
+
+    Any admin may set these on a non-admin account. Admin-tier accounts hold
+    every capability implicitly, so there is nothing to set on them.
+    """
+    actor, actor_role = await require_tier(request)
+
+    target = await User.get_by_id(user_id)
+    if target is None:
+        return JSONResponse({"error": "user not found"}, 404)
+    if is_admin(target.role) and not is_superadmin(actor_role):
+        return JSONResponse({"error": "only a superadmin can change admin status"}, 403)
+    if is_admin(target.role):
+        return JSONResponse(
+            {"error": "admins hold every capability; change the role instead"}, 400
+        )
+
+    requested = {
+        cap: bool(value)
+        for cap, value in (body.capabilities or {}).items()
+        if cap in ALL_CAPABILITIES
+    }
+    unknown = set(body.capabilities or {}) - set(ALL_CAPABILITIES)
+    if unknown:
+        return JSONResponse({"error": f"unknown capability: {', '.join(sorted(unknown))}"}, 400)
+
+    if not await User.update_capabilities(user_id, requested):
+        return JSONResponse({"error": "user not found"}, 404)
+
+    # Revoking terminal reach must also close any window already open on it.
+    if requested.get(CAP_TERMINAL) is False:
+        revoke(user_id)
+
+    _, caps = await resolve(user_id)
+    return {"ok": True, "capabilities": sorted(caps)}
 
 
 @router.put("/users/{user_id}/profile")
@@ -378,6 +517,10 @@ class CreateUserRequest(BaseModel):
 
 class RoleRequest(BaseModel):
     role: str
+
+
+class CapabilitiesRequest(BaseModel):
+    capabilities: dict[str, bool]
 
 
 class UpdateUserProfileRequest(BaseModel):

@@ -11,9 +11,11 @@
 
 	interface Props {
 		gitSettingsAvailable?: boolean;
+		/** Opens a host terminal; forwarded to the nav's Terminal entry. */
+		onopenterminal?: () => void;
 	}
 
-	let { gitSettingsAvailable = false }: Props = $props();
+	let { gitSettingsAvailable = false, onopenterminal }: Props = $props();
 	let showPicker = $state(false);
 	let showSettings = $state(false);
 	let showSystemInfo = $state(false);
@@ -83,7 +85,7 @@
 			ondblclick={() => sidebarWidth.set(220)}
 		></div>
 		<SidebarHeader />
-		<SidebarNav />
+		<SidebarNav {onopenterminal} />
 		<SidebarWorkspaceList onaddworkspace={() => (showPicker = true)} />
 		<SidebarFooter onsettings={openSettings} onsysteminfo={openSystemInfo} />
 	</aside>

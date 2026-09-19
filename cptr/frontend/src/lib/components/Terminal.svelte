@@ -1,5 +1,10 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { setElevated } from '$lib/session';
+	import ElevationModal from '$lib/components/ElevationModal.svelte';
+
+	/** Matches cptr.utils.elevation.WS_ELEVATION_REQUIRED on the server. */
+	const WS_ELEVATION_REQUIRED = 4003;
 	import { Terminal } from '@xterm/xterm';
 	import { FitAddon } from '@xterm/addon-fit';
 	import { WebglAddon } from '@xterm/addon-webgl';
@@ -66,6 +71,12 @@
 	let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let destroyed = false;
+	/**
+	 * Close code 4003 means the elevation window lapsed. The PTY is still
+	 * running server-side, so we hold the socket shut and re-prompt instead of
+	 * reconnecting in a loop.
+	 */
+	let needsElevation = $state(false);
 	let lastSentCols = 0;
 	let lastSentRows = 0;
 
@@ -487,6 +498,13 @@
 		ws.onclose = (e) => {
 			console.log(`[terminal] WebSocket closed for ${label}, code=${e.code}, reason=${e.reason}`);
 			if (destroyed) return;
+			if (e.code === WS_ELEVATION_REQUIRED) {
+				// Re-prompt rather than reconnect: the server would just close
+				// us again, and the PTY is still alive waiting behind it.
+				setElevated(false);
+				needsElevation = true;
+				return;
+			}
 			reconnectTimer = setTimeout(() => {
 				if (!destroyed) connectWebSocket();
 			}, 2000);
@@ -523,6 +541,17 @@
 	<div bind:this={containerEl} class="flex-1 min-h-0 pt-1 pl-2 overflow-hidden"></div>
 	<!-- On mobile, xterm's textarea gets moved here as a flex sibling -->
 </div>
+
+{#if needsElevation}
+	<ElevationModal
+		expired
+		onclose={() => (needsElevation = false)}
+		onelevated={() => {
+			needsElevation = false;
+			connectWebSocket();
+		}}
+	/>
+{/if}
 
 <style>
 	@reference "../../app.css";

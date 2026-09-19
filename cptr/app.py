@@ -29,8 +29,11 @@ from cptr.routers import (
     terminal_router,
     workspace_router,
 )
+from cptr.env import TLS_ENABLED
 from cptr.utils.config import check_access, load_config
 from cptr.utils.db import init_db
+from cptr.utils.elevation import is_elevated, touch
+from cptr.utils.permissions import CAP_TERMINAL, capability_for_path, has_capability
 
 START_TIME = time.time()
 
@@ -131,6 +134,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+# Transport security headers. Registered before the auth middleware so it wraps
+# it: these headers belong on rejections as much as on successful responses.
+if TLS_ENABLED:
+
+    @app.middleware("http")
+    async def transport_security(request: Request, call_next):
+        response = await call_next(request)
+        # 1 day, not a year: cptr is often reached by LAN IP or .local name, and
+        # a long max-age would strand that host on HTTPS if the user later runs
+        # a different service there. No preload, no includeSubDomains.
+        response.headers.setdefault("Strict-Transport-Security", "max-age=86400")
+        return response
+
+
 # Auth middleware
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -164,6 +181,24 @@ async def auth_middleware(request: Request, call_next):
     )
     if auth is None:
         return JSONResponse({"error": "unauthorized"}, 401)
+
+    # Capability gate. Roles and grants are read from the database (behind a
+    # few-second cache) rather than trusted from the JWT, so revoking a grant
+    # takes effect without waiting out a 30-day session.
+    required = capability_for_path(path)
+    if required is not None and not await has_capability(auth.user_id, required):
+        return JSONResponse(
+            {"error": "forbidden", "missing_capability": required},
+            403,
+        )
+
+    # Reaching a PTY needs a live TOTP elevation window on top of the
+    # capability. The WebSocket upgrade is checked inside the route, since
+    # middleware cannot answer an upgrade with JSON.
+    if required == CAP_TERMINAL and not is_elevated(auth.user_id):
+        return JSONResponse({"error": "elevation required", "elevation": True}, 403)
+    if required == CAP_TERMINAL:
+        touch(auth.user_id)
 
     request.state.auth = auth
     return await call_next(request)

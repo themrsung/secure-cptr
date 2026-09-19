@@ -3,6 +3,7 @@
 	import Modal from '../Modal.svelte';
 	import {
 		updateRole,
+		updateCapabilities,
 		updateUserProfile,
 		resetPassword,
 		updateUsername,
@@ -18,26 +19,56 @@
 		profile_image_url: string | null;
 		role: string;
 		created_at: number;
+		capabilities?: { terminal: boolean; machine: boolean; external: boolean };
+		totp_enabled?: boolean;
+		totp_reset_required?: boolean;
 	}
 
 	interface Props {
 		user: User;
 		adminCount: number;
 		currentUserId: string;
+		/** Role of the signed-in admin; only a superadmin may touch admin status. */
+		currentUserRole?: string;
 		onclose: () => void;
 		onchanged: () => void;
 	}
 
-	const ROLES = ['admin', 'user', 'pending'] as const;
+	const CAPABILITIES = [
+		{ key: 'terminal', label: 'admin.capTerminal', hint: 'admin.capTerminalHint' },
+		{ key: 'machine', label: 'admin.capMachine', hint: 'admin.capMachineHint' },
+		{ key: 'external', label: 'admin.capExternal', hint: 'admin.capExternalHint' }
+	] as const;
 
-	let { user, adminCount, currentUserId, onclose, onchanged }: Props = $props();
+	let {
+		user,
+		adminCount,
+		currentUserId,
+		currentUserRole = 'admin',
+		onclose,
+		onchanged
+	}: Props = $props();
 
 	let isSelf = $derived(user.user_id === currentUserId);
+	let isSuperadmin = $derived(currentUserRole === 'superadmin');
+	/** Admin tiers hold every capability implicitly, so the toggles are moot. */
+	let targetIsAdmin = $derived(role === 'admin' || role === 'superadmin');
+
+	/**
+	 * Which roles this admin may assign. Granting or removing admin is reserved
+	 * to superadmins; the server enforces the same rule.
+	 */
+	let roles = $derived(
+		isSuperadmin ? ['superadmin', 'admin', 'user', 'pending'] : ['user', 'pending']
+	);
 
 	let username = $state(user.username);
 	let displayName = $state(user.display_name ?? '');
 	let newPassword = $state('');
 	let role = $state(user.role);
+	let caps = $state({
+		...(user.capabilities ?? { terminal: false, machine: false, external: false })
+	});
 	let saving = $state(false);
 
 	async function save() {
@@ -64,6 +95,16 @@
 			}
 			if (role !== user.role) {
 				await updateRole(user.user_id, role);
+			}
+			// Only meaningful for non-admins; the server rejects it otherwise.
+			if (!targetIsAdmin) {
+				const before = user.capabilities ?? { terminal: false, machine: false, external: false };
+				const changed = Object.fromEntries(
+					Object.entries(caps).filter(([k, v]) => v !== before[k as keyof typeof before])
+				);
+				if (Object.keys(changed).length) {
+					await updateCapabilities(user.user_id, changed);
+				}
 			}
 			if (newPassword) {
 				await resetPassword(user.user_id, newPassword);
@@ -125,10 +166,36 @@
 			disabled={isSelf}
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer disabled:opacity-50"
 		>
-			{#each ROLES as r}<option value={r}>{r}</option>{/each}
+			{#each roles as r}<option value={r}>{r}</option>{/each}
 		</select>
+		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-3"
+			>{$t('admin.capabilities')}</label
+		>
+		{#if targetIsAdmin}
+			<p class="text-[0.6875rem] text-gray-400 dark:text-gray-600 m-0 py-0.5">
+				{$t('admin.capAdminImplicit')}
+			</p>
+		{:else}
+			<div class="flex flex-col gap-1.5 py-0.5">
+				{#each CAPABILITIES as cap}
+					<label class="flex items-start gap-2 cursor-pointer group">
+						<input
+							type="checkbox"
+							checked={caps[cap.key]}
+							onchange={(e) => (caps = { ...caps, [cap.key]: e.currentTarget.checked })}
+							class="mt-[0.1875rem] accent-gray-900 dark:accent-white cursor-pointer"
+						/>
+						<span class="flex flex-col leading-tight">
+							<span class="text-[0.8125rem] text-gray-700 dark:text-gray-300">{$t(cap.label)}</span>
+							<span class="text-[0.625rem] text-gray-400 dark:text-gray-600">{$t(cap.hint)}</span>
+						</span>
+					</label>
+				{/each}
+			</div>
+		{/if}
+
 		<div class="flex items-center justify-between mt-3">
-			{#if !isSelf && (user.role !== 'admin' || adminCount > 1)}
+			{#if !isSelf && (!['admin', 'superadmin'].includes(user.role) ? true : isSuperadmin && adminCount > 1)}
 				<button
 					class="text-[0.8125rem] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100"
 					onclick={deleteUser}>{$t('admin.delete')}</button

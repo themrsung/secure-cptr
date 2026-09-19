@@ -10,6 +10,15 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisco
 from pydantic import BaseModel
 
 from cptr.utils.config import check_access
+from cptr.utils.elevation import (
+    WS_ELEVATION_REQUIRED,
+    is_elevated,
+    register_listener,
+    revoke,
+    touch,
+    unregister_listener,
+)
+from cptr.utils.permissions import CAP_MACHINE, CAP_TERMINAL, has_capability
 from cptr.utils.identity import IdentityUnavailable, identity_for_request
 from cptr.utils.terminal import TerminalUnavailable, manager, IS_WINDOWS
 from cptr.utils.tools import (
@@ -93,6 +102,11 @@ async def delete_session(request: Request, session_id: str):
     logger.info(f"Deleting session {session_id}")
     if not manager.close(request, session_id):
         raise HTTPException(status_code=404, detail="Session not found")
+    # Deliberately killing a terminal ends the elevation window: asking for a
+    # fresh terminal afterwards costs a fresh code.
+    auth = getattr(request.state, "auth", None)
+    if auth is not None and auth.user_id:
+        revoke(auth.user_id)
     return {"status": "closed"}
 
 
@@ -111,6 +125,10 @@ async def command_session_ws(websocket: WebSocket, command_session_id: str):
     auth = check_access(client_host=client_host, jwt_token=token)
     if auth is None:
         await websocket.close(code=4001, reason="unauthorized")
+        return
+    # Agent command output, not a host shell: machine reach, no elevation.
+    if not await has_capability(auth.user_id, CAP_MACHINE):
+        await websocket.close(code=4001, reason="machine access not granted")
         return
     websocket.state.auth = auth
 
@@ -223,6 +241,14 @@ async def terminal_ws(websocket: WebSocket, session_id: str):
     if auth is None:
         await websocket.close(code=4001, reason="unauthorized")
         return
+    if not await has_capability(auth.user_id, CAP_TERMINAL):
+        logger.warning("WebSocket: %s lacks terminal capability", auth.username)
+        await websocket.close(code=4001, reason="terminal access not granted")
+        return
+    # A PTY additionally needs a live TOTP elevation window.
+    if not is_elevated(auth.user_id):
+        await websocket.close(code=WS_ELEVATION_REQUIRED, reason="elevation required")
+        return
     websocket.state.auth = auth
 
     session = manager.get(websocket, session_id)
@@ -232,6 +258,7 @@ async def terminal_ws(websocket: WebSocket, session_id: str):
         return
 
     await websocket.accept()
+    register_listener(auth.user_id, websocket)
     logger.info(
         f"WebSocket connected for session {session_id}, fd={session._fd}, alive={session.is_alive()}"
     )
@@ -265,6 +292,13 @@ async def terminal_ws(websocket: WebSocket, session_id: str):
                     try:
                         data = await asyncio.to_thread(session.read, 16384)
                         if data:
+                            # Output counts as activity: a long build that
+                            # keeps printing keeps the elevation window open.
+                            if not touch(auth.user_id):
+                                await websocket.close(
+                                    code=WS_ELEVATION_REQUIRED, reason="elevation expired"
+                                )
+                                break
                             await websocket.send_bytes(data)
                     except EOFError:
                         logger.info(f"Session {session_id} reached EOF")
@@ -293,6 +327,13 @@ async def terminal_ws(websocket: WebSocket, session_id: str):
                             total += len(data)
 
                         if chunks:
+                            # Output counts as activity: a long build that
+                            # keeps printing keeps the elevation window open.
+                            if not touch(auth.user_id):
+                                await websocket.close(
+                                    code=WS_ELEVATION_REQUIRED, reason="elevation expired"
+                                )
+                                break
                             await websocket.send_bytes(b"".join(chunks))
                         elif not session.is_alive():
                             logger.info(f"Session {session_id} died, stopping read")
@@ -314,6 +355,13 @@ async def terminal_ws(websocket: WebSocket, session_id: str):
             raw = await websocket.receive_bytes()
             if len(raw) < 1:
                 continue
+
+            # Keystrokes refresh the window too. A lapsed window ends the
+            # socket but deliberately leaves the PTY running, so an expiry
+            # never destroys in-flight work.
+            if not touch(auth.user_id):
+                await websocket.close(code=WS_ELEVATION_REQUIRED, reason="elevation expired")
+                break
 
             msg_type = raw[0]
             payload = raw[1:]
@@ -342,6 +390,7 @@ async def terminal_ws(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"WebSocket error for {session_id}: {e}")
     finally:
+        unregister_listener(auth.user_id, websocket)
         read_task.cancel()
         try:
             await read_task

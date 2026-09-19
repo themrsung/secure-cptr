@@ -34,7 +34,10 @@
 
 	let totalPages = $derived(Math.max(1, Math.ceil(users.length / PAGE_SIZE)));
 	let pagedUsers = $derived(users.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));
-	let adminCount = $derived(users.filter((u) => u.role === 'admin').length);
+	// Superadmins count as admins: this guards "don't remove the last owner".
+	let adminCount = $derived(
+		users.filter((u) => u.role === 'admin' || u.role === 'superadmin').length
+	);
 
 	async function loadUsers() {
 		try {
@@ -167,6 +170,7 @@
 		user={editUser}
 		{adminCount}
 		currentUserId={$session?.user_id ?? ''}
+		currentUserRole={$session?.role ?? 'admin'}
 		onclose={() => (editUser = null)}
 		onchanged={handleChanged}
 	/>

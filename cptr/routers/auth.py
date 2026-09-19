@@ -12,6 +12,7 @@ from cptr.utils.config import (
     AuthMode,
     check_access,
     check_rate_limit,
+    create_ticket,
     create_token,
     get_auth_mode,
     get_or_create_user,
@@ -22,12 +23,31 @@ from cptr.utils.config import (
     pam_authenticate,
     record_attempt,
     verify_password,
+    verify_ticket,
 )
+from cptr.env import TLS_ENABLED
 from cptr.models import User, Auth, Config
+from cptr.utils.elevation import expires_at, grant, revoke
+from cptr.utils.permissions import (
+    CAP_TERMINAL,
+    ROLE_SUPERADMIN,
+    has_capability,
+    is_admin,
+    resolve,
+)
+from cptr.utils.twofactor import begin_enrollment, check_code, needs_enrollment
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_NAME = "cptr_session"
+
+# Ticket purposes bridging the password step to the TOTP step.
+TICKET_ENROLL = "totp-enroll"
+TICKET_LOGIN = "totp-login"
+
+
+class ElevateRequest(BaseModel):
+    code: str
 
 
 def _ok_with_cookie(jwt_token: str, data: dict | None = None) -> JSONResponse:
@@ -40,6 +60,9 @@ def _ok_with_cookie(jwt_token: str, data: dict | None = None) -> JSONResponse:
         samesite="lax",
         path="/",
         max_age=SESSION_MAX_AGE,
+        # Under TLS the cookie must never be sent over a plain-HTTP fallback.
+        # Left off when serving HTTP so that `--no-tls` on loopback still works.
+        secure=TLS_ENABLED,
     )
     return resp
 
@@ -75,6 +98,8 @@ async def get_auth(request: Request):
             response.delete_cookie(COOKIE_NAME, path="/")
             return response
 
+        _, caps = await resolve(auth.user_id)
+        elevation_expiry = expires_at(auth.user_id)
         data = {
             "authenticated": True,
             "user_id": auth.user_id,
@@ -83,6 +108,11 @@ async def get_auth(request: Request):
             "role": user.role,
             "profile_image_url": user.profile_image_url,
             "exp": int(auth.exp * 1000),
+            # Drives what the UI offers. The server re-checks every one of
+            # these on the request itself; this is presentation only.
+            "capabilities": sorted(caps),
+            "elevated": elevation_expiry is not None,
+            "elevation_expires_at": int(elevation_expiry * 1000) if elevation_expiry else None,
         }
 
         # Sliding session: refresh token if past halfway to expiry
@@ -111,15 +141,18 @@ async def setup(request: Request, body: SetupRequest):
     if len(body.password.strip()) < 6:
         return JSONResponse({"error": "min 6 characters"}, 400)
 
+    # Whoever sets the box up owns it outright.
     user_id = await User.create(
         username=body.username.strip(),
         password_hash=hash_password(body.password.strip()),
-        role="admin",
+        role=ROLE_SUPERADMIN,
         display_name=body.display_name,
         created_at=now_ms(),
     )
 
-    return _ok_with_cookie(create_token(user_id, body.username.strip(), role="admin"))
+    # No session yet: the very first sign-in enrols a second factor like any
+    # other, so there is never an account without one.
+    return await _second_factor_challenge(user_id, body.username.strip())
 
 
 @router.post("/login")
@@ -141,7 +174,7 @@ async def login(request: Request, body: LoginRequest):
         auth, user = result
         if user.role == "pending":
             return JSONResponse({"error": "account pending approval"}, 403)
-        return _ok_with_cookie(create_token(auth.user_id, auth.username, role=user.role))
+        return await _second_factor_challenge(auth.user_id, auth.username)
 
     if mode == AuthMode.PAM:
         if not body.username:
@@ -151,22 +184,165 @@ async def login(request: Request, body: LoginRequest):
         user_id = await get_or_create_user(body.username)
         user = await User.get_by_id(user_id)
         if user and user.role == "pending":
-            role = (
-                "admin" if not any(u["role"] == "admin" for u in await User.list_all()) else "user"
-            )
+            role = _bootstrap_role(await User.list_all())
             await User.update_role(user_id, role)
             user.role = role
-        return _ok_with_cookie(
-            create_token(user_id, body.username, role=user.role if user else "user"),
-            {"ok": True, "username": body.username},
-        )
+        return await _second_factor_challenge(user_id, body.username)
 
     return JSONResponse({"error": "auth not configured"}, 400)
 
 
+def _bootstrap_role(existing: list[dict]) -> str:
+    """Role for the first PAM user to arrive: the very first one owns the box."""
+    if any(is_admin(u["role"]) for u in existing):
+        return "user"
+    return ROLE_SUPERADMIN
+
+
+async def _second_factor_challenge(user_id: str, username: str) -> JSONResponse:
+    """Password step passed — hand back a TOTP challenge, never a session.
+
+    Two shapes come back, both carrying a 5-minute ticket rather than a
+    cookie:
+
+    * `totp_enrollment` — first sign-in (or after `cptr recovery reset`).
+      The secret, `otpauth://` URI and a QR code are shown once, here, and
+      never again.
+    * `totp_required` — steady state; the client just collects six digits.
+    """
+    auth = await Auth.get_by_user_id(user_id)
+    if auth is None:
+        return JSONResponse({"error": "incorrect credentials"}, 401)
+
+    if needs_enrollment(auth):
+        enrollment = await begin_enrollment(user_id, username)
+        return JSONResponse(
+            {
+                "totp_enrollment": True,
+                "ticket": create_ticket(user_id, username, TICKET_ENROLL),
+                "secret": enrollment["secret"],
+                "uri": enrollment["uri"],
+                "qr_svg": enrollment["qr_svg"],
+            }
+        )
+
+    return JSONResponse(
+        {
+            "totp_required": True,
+            "ticket": create_ticket(user_id, username, TICKET_LOGIN),
+        }
+    )
+
+
+class TotpRequest(BaseModel):
+    ticket: str
+    code: str
+
+
+@router.post("/login/totp")
+async def login_totp(request: Request, body: TotpRequest):
+    """Second step of login: exchange a ticket plus a valid code for a session.
+
+    Confirming an enrolment and satisfying a routine challenge land here alike;
+    the ticket's purpose says which, so an enrolment ticket cannot be replayed
+    to skip a challenge on an already-enrolled account.
+    """
+    ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(ip):
+        return JSONResponse({"error": "too many attempts"}, 429)
+    record_attempt(ip)
+
+    claims = verify_ticket(body.ticket, TICKET_ENROLL) or verify_ticket(body.ticket, TICKET_LOGIN)
+    if claims is None:
+        return JSONResponse({"error": "login expired, start again"}, 401)
+    confirming = claims.get("typ") == TICKET_ENROLL
+
+    auth = await Auth.get_by_user_id(claims["sub"])
+    user = await User.get_by_id(claims["sub"])
+    if auth is None or user is None:
+        return JSONResponse({"error": "incorrect credentials"}, 401)
+    if user.role == "pending":
+        return JSONResponse({"error": "account pending approval"}, 403)
+    # An enrolment ticket must not satisfy an account that is already enrolled.
+    if confirming != needs_enrollment(auth):
+        return JSONResponse({"error": "login expired, start again"}, 401)
+
+    ok, error = await check_code(auth, body.code, confirming=confirming)
+    if not ok:
+        return JSONResponse({"error": error or "invalid code"}, 401)
+
+    return _ok_with_cookie(
+        create_token(auth.user_id, auth.username, role=user.role),
+        {"ok": True, "username": auth.username, "enrolled": confirming},
+    )
+
+
+@router.post("/elevate")
+async def elevate(request: Request, body: ElevateRequest):
+    """Open a terminal elevation window by re-entering a TOTP code.
+
+    Holding the `terminal` capability is not enough to reach a PTY — see
+    `cptr.utils.elevation` for the idle window this opens.
+    """
+    ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(ip):
+        return JSONResponse({"error": "too many attempts"}, 429)
+    record_attempt(ip)
+
+    token = request.cookies.get(COOKIE_NAME)
+    auth_info = check_access(
+        client_host=request.client.host if request.client else "127.0.0.1",
+        jwt_token=token,
+    )
+    if auth_info is None or not auth_info.user_id:
+        return JSONResponse({"error": "not authenticated"}, 401)
+
+    if not await has_capability(auth_info.user_id, CAP_TERMINAL):
+        return JSONResponse({"error": "terminal access not granted"}, 403)
+
+    auth = await Auth.get_by_user_id(auth_info.user_id)
+    if auth is None or needs_enrollment(auth):
+        return JSONResponse({"error": "two-factor authentication is not set up"}, 403)
+
+    ok, error = await check_code(auth, body.code)
+    if not ok:
+        return JSONResponse({"error": error or "invalid code"}, 401)
+
+    expires = grant(auth_info.user_id)
+    return JSONResponse({"ok": True, "expires_at": int(expires * 1000)})
+
+
+@router.get("/elevation")
+async def elevation_status(request: Request):
+    """Whether the caller currently holds a terminal elevation window."""
+    token = request.cookies.get(COOKIE_NAME)
+    auth_info = check_access(
+        client_host=request.client.host if request.client else "127.0.0.1",
+        jwt_token=token,
+    )
+    if auth_info is None or not auth_info.user_id:
+        return JSONResponse({"error": "not authenticated"}, 401)
+
+    _, caps = await resolve(auth_info.user_id)
+    expiry = expires_at(auth_info.user_id)
+    return {
+        "elevated": expiry is not None,
+        "expires_at": int(expiry * 1000) if expiry else None,
+        "capabilities": sorted(caps),
+    }
+
+
 @router.post("/logout")
-async def logout():
-    """Logout = delete cookie."""
+async def logout(request: Request):
+    """Logout = delete cookie, and drop any terminal elevation window."""
+    token = request.cookies.get(COOKIE_NAME)
+    auth_info = check_access(
+        client_host=request.client.host if request.client else "127.0.0.1",
+        jwt_token=token,
+    )
+    if auth_info is not None and auth_info.user_id:
+        revoke(auth_info.user_id)
+
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(key=COOKIE_NAME, path="/")
     return resp

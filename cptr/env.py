@@ -55,6 +55,11 @@ UPSTREAM_REQUEST_LOG_ROTATION = os.environ.get("CPTR_UPSTREAM_REQUEST_LOG_ROTATI
 # One-time token for first-time setup. Set by CLI, consumed by app.
 STARTUP_TOKEN: str | None = os.environ.pop("CPTR_STARTUP_TOKEN", None)
 
+# -- TLS ------------------------------------------------------------
+# Set by `cptr run` when it serves HTTPS. Drives the Secure cookie flag and
+# the HSTS header; both must stay off over plain HTTP or loopback dev breaks.
+TLS_ENABLED: bool = _env_bool("CPTR_TLS", "false")
+
 # ── Chat settings ───────────────────────────────────────────
 CHAT_MAX_ITERATIONS = int(os.environ.get("CHAT_MAX_ITERATIONS", "2048"))
 ENABLE_CHAT_RECONCILE_ON_STARTUP: bool = os.environ.get(

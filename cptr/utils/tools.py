@@ -25,6 +25,7 @@ from typing import Any, Literal, Optional, get_args, get_origin, get_type_hints
 from fastapi import Request
 from cptr.env import CHAT_TOOL_COMMAND_MAX_CHARS, CHAT_TOOL_MAX_CHARS, EXECUTE_TIMEOUT
 from cptr.utils.gitignore import is_gitignored, load_gitignore
+from cptr.utils.permissions import ADMIN_CAPS, CAP_EXTERNAL, resolve, tool_allowed
 from cptr.utils.identity import (
     IdentityUnavailable,
     env_for,
@@ -3214,11 +3215,20 @@ def _without_background_param(schema: dict) -> dict:
     return schema
 
 
-async def get_tool_list(builtin_tools: dict | None = None, workspace: str = "") -> list[dict]:
+async def get_tool_list(
+    builtin_tools: dict | None = None,
+    workspace: str = "",
+    user_id: str | None = None,
+) -> list[dict]:
     """Return tool schemas for the LLM.
 
     Automatically includes browser tools when browser.enabled is true,
     and external tool server tools when configured.
+
+    When `user_id` is given, the list is narrowed to what that account may
+    actually reach: an account with no capabilities never sees a filesystem,
+    shell, browser or MCP tool in its schema at all. `execute_tool` re-checks
+    the same thing, so a model that invents a tool name gets nowhere.
     """
     tools = dict(TOOLS)
     background_subagents_enabled = False
@@ -3266,29 +3276,53 @@ async def get_tool_list(builtin_tools: dict | None = None, workspace: str = "") 
     if disabled_tools:
         tools = {name: tool for name, tool in tools.items() if name not in disabled_tools}
 
+    # Capability filter: drop anything this account may not reach.
+    caps = await _capabilities_for(user_id)
+    tools = {name: tool for name, tool in tools.items() if tool_allowed(name, caps)}
+
     schemas = [_fn_to_schema(name, t["fn"]) for name, t in tools.items()]
     if not background_subagents_enabled:
         schemas = [_without_background_param(s) for s in schemas]
 
-    # Add external tool server schemas
-    try:
-        cache = await _load_tool_servers()
-        for tool_info in cache["tools"].values():
-            schemas.append(tool_info["spec"])
-    except Exception:
-        pass
+    # External tool servers (remote MCP connectors) require CAP_EXTERNAL.
+    if CAP_EXTERNAL in caps:
+        try:
+            cache = await _load_tool_servers()
+            for tool_info in cache["tools"].values():
+                schemas.append(tool_info["spec"])
+        except Exception:
+            pass
 
     return schemas
 
 
+async def _capabilities_for(user_id: str | None) -> frozenset[str]:
+    """Capability set for a chat's owner.
+
+    A missing `user_id` means an internal caller with no user context — those
+    keep full reach, since they are server-side automations rather than a
+    logged-in account.
+    """
+    if not user_id:
+        return ADMIN_CAPS
+    _, caps = await resolve(user_id)
+    return caps
+
+
 async def execute_tool(name: str, args: dict, __context__: dict) -> str:
     """Execute a tool by name, injecting execution context."""
+    caps = await _capabilities_for(__context__.get("user_id"))
+
     info = ALL_TOOLS.get(name)
     if info:
         if not __context__.get("workspace") and name in GLOBAL_CHAT_DISABLED_TOOLS:
             return f"Error: tool requires an open workspace: {name}"
         if not is_builtin_tool_enabled(name, __context__.get("builtin_tools")):
             return f"Error: tool disabled: {name}"
+        # Re-check at the point of use: the schema filter is an optimisation,
+        # this is the actual boundary.
+        if not tool_allowed(name, caps):
+            return f"Error: your account does not have permission to use {name}"
         fn = info["fn"]
         args = dict(args)
         args.pop("workspace", None)
@@ -3302,9 +3336,11 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
         except Exception as e:
             return f"Error executing {name}: {e}"
 
-    # Check external tool servers
+    # External tool servers (remote MCP connectors)
     cache = await _load_tool_servers()
     if name in cache["tools"]:
+        if CAP_EXTERNAL not in caps:
+            return f"Error: your account does not have permission to use {name}"
         return await _execute_external_tool(name, args)
 
     return f"Error: unknown tool: {name}"
